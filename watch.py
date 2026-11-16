@@ -8,9 +8,9 @@ SixTONES公式サイトの新着ニュースを監視し、Slackに通知する�
   python watch.py            # 通常の監視（GitHub Actionsから定期実行）
   python watch.py --test 479 # 指定番号の記事でSlack通知をテスト（状態は更新しない）
 """
-import html, json, os, re, sys, urllib.request, urllib.error
+import html, json, os, re, sys, time, urllib.request, urllib.error
 
-BASE = "https://sixtones.jp/news/"
+HOSTS = ["https://sixtones.jp", "https://www.sixtones.jp"]  # 片方が引けない場合に備えて両方試す
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
 LOOKAHEAD = 5  # 番号が飛ぶ場合に備え、先の番号もいくつか確認する
 KEYWORDS = ["日程", "公演", "東京ドーム", "ナゴヤドーム", "バンテリン", "ドーム",
@@ -22,18 +22,29 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
 
 def fetch(news_id):
     """記事があれば {id,url,title,desc,text} を、なければ None を返す"""
-    url = f"{BASE}{news_id}"
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "ja"})
-    try:
-        with urllib.request.urlopen(req, timeout=20) as r:
-            if r.status != 200 or not r.geturl().rstrip("/").endswith(f"/news/{news_id}"):
-                return None  # トップ等へリダイレクト＝記事なし
-            body = r.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        if e.code in (404, 410):
-            return None
-        raise
+    last_err = None
+    for attempt in range(3):           # 一時的な通信エラーに備えて最大3回
+        for host in HOSTS:
+            url = f"{host}/news/{news_id}"
+            req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "ja"})
+            try:
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    if r.status != 200 or not r.geturl().rstrip("/").endswith(f"/news/{news_id}"):
+                        return None  # トップ等へリダイレクト＝記事なし
+                    body = r.read().decode("utf-8", errors="replace")
+                return parse(news_id, url, body)
+            except urllib.error.HTTPError as e:
+                if e.code in (404, 410):
+                    return None
+                last_err = f"{url}: HTTP {e.code}"
+            except urllib.error.URLError as e:
+                last_err = f"{url}: {e.reason}"
+            print(f"  接続失敗 {last_err}")
+        time.sleep(5)
+    raise RuntimeError(f"公式サイトに接続できませんでした（{last_err}）")
 
+
+def parse(news_id, url, body):
     def meta(prop):
         m = re.search(rf'<meta[^>]+(?:property|name)=["\']{prop}["\'][^>]+content=["\']([^"\']*)', body, re.I) \
             or re.search(rf'<meta[^>]+content=["\']([^"\']*)["\'][^>]+(?:property|name)=["\']{prop}["\']', body, re.I)
